@@ -15,13 +15,14 @@ _time = time.time
 _get_att = motion.get_attitude
 _get_acc = motion.get_user_acceleration
 _cos = cos; _sin = sin; _sqrt = sqrt
-_fill = fill; _abs = abs; _rect = rect
+_fill = fill; _abs = abs
 _float = float
 _int = int
 _range = range
 _min = min; _max = max
 _fabs = fabs
 _enumerate = enumerate
+_traingle_strip = triangle_strip
 eps = 1e-6
 
 CUBE_EDGES = [
@@ -203,7 +204,6 @@ class Game(Scene):
         for x_off in x_offsets:
             hit_buf   = [[False]*sx for _ in _range(sy)]
             color_buf = [[None ]*sx for _ in _range(sy)]
-            edge_buf  = [[False]*sx for _ in _range(sy)]
             for py, ny in _enumerate(py_mul):
                 for px, nx in _enumerate(px_mul):
                     dx = r00*nx + r01*ny + r02
@@ -279,14 +279,32 @@ class Game(Scene):
                             (_fabs(hy-ymin)<tol or _fabs(hy-ymax)<tol) +
                             (_fabs(hz-zmin)<tol or _fabs(hz-zmax)<tol)
                         )
-                        edge_buf[py][px] = (cnt >= 2)
+                        if cnt >= 2:
+                            color_buf[py][px] = edges_color
             for py in _range(sy):
-                for px in _range(sx):
-                    if not hit_buf[py][px]:
+                row_hit = hit_buf[py]
+                row_col = color_buf[py]
+                y0 = py * res
+                y1 = y0 + res
+                px = 0
+                coords = [None, None, None, None]
+                while px < sx:
+                    if not row_hit[px]:
+                        px += 1
                         continue
-                    col = edges_color if (edges and edge_buf[py][px]) else color_buf[py][px]
-                    _fill(col)
-                    _rect(x_off + px*res, py*res, res, res)
+                    run_color = row_col[px]
+                    start = px
+                    px += 1
+                    while px < sx and row_hit[px] and row_col[px] == run_color:
+                        px += 1
+                    x0 = x_off + start * res
+                    x1 = x_off + px    * res
+                    coords[0] = (x0, y0)
+                    coords[1] = (x1, y0)
+                    coords[2] = (x0, y1)
+                    coords[3] = (x1, y1)
+                    _fill(run_color)
+                    _triangle_strip(coords)
         
     def stop(self):
         motion.stop_updates()
