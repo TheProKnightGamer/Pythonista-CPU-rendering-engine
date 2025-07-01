@@ -22,7 +22,7 @@ _range = range
 _min = min; _max = max
 _fabs = fabs
 _enumerate = enumerate
-_traingle_strip = triangle_strip
+_triangle_strip = triangle_strip
 eps = 1e-6
 
 CUBE_EDGES = [
