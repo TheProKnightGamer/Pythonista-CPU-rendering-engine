@@ -1,16 +1,17 @@
-# Toggle this to enable stereo-VR duplication
+#Args:
 shading = True # ~0.1–.3 fps lost
-VR = False   # ~0.1–0.3 fps lost
-debug = True     # ~0.1–0.4 fps lost
+VR = False # ~0.1–0.3 fps lost
+debug = True # ~0.1–0.4 fps lost
 edges = True #~ 0.1-0.5 fps lost
-edges_color = "#000000"
+edges_color = "#000000" # default: black
+
 from scene import *
 from math import sin, cos, tan, radians, sqrt, fabs
 import motion, time
 import numpy as np
 import ui, console
 
-# Shortcuts
+# Shortcuts, these make the engine quite faster.
 _time = time.time
 _get_att = motion.get_attitude
 _get_acc = motion.get_user_acceleration
