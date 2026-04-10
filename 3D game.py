@@ -53,6 +53,7 @@ _SUN_X = 0.5773502691896258
 _SUN_Y = 0.6928203230275509
 _SUN_Z = -0.4618802153517006
 _MIN_INTENSITY = 0.3
+_NEAR_CLIP = 0.1
 
 
 class Gizmo(ShapeNode):
@@ -235,21 +236,21 @@ class Game(Scene):
             c0x = t00*dx + t01*dy + t02*dz
             c0y = t10*dx + t11*dy + t12*dz
             c0z = t20*dx + t21*dy + t22*dz
-            if c0z < 0.1:
+            if c0z < _NEAR_CLIP:
                 continue
 
             dx = v1[0] - posx; dy = v1[1] - posy; dz = v1[2] - posz
             c1x = t00*dx + t01*dy + t02*dz
             c1y = t10*dx + t11*dy + t12*dz
             c1z = t20*dx + t21*dy + t22*dz
-            if c1z < 0.1:
+            if c1z < _NEAR_CLIP:
                 continue
 
             dx = v2[0] - posx; dy = v2[1] - posy; dz = v2[2] - posz
             c2x = t00*dx + t01*dy + t02*dz
             c2y = t10*dx + t11*dy + t12*dz
             c2z = t20*dx + t21*dy + t22*dz
-            if c2z < 0.1:
+            if c2z < _NEAR_CLIP:
                 continue
 
             inv_z0 = 1.0 / c0z
@@ -268,7 +269,7 @@ class Game(Scene):
             projected.append((avg_depth, s0x, s0y, s1x, s1y, s2x, s2y, tri_color))
 
         # --- Painter's algorithm: sort back-to-front (descending depth) ---
-        projected.sort(key=lambda t: -t[0])
+        projected.sort(reverse=True)
 
         # --- Draw triangles for each viewport (mono or VR) ---
         for x_off in x_offsets:
