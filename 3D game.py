@@ -6,9 +6,8 @@ edges = True
 edges_color = "#000000"
 
 from scene import *
-from math import sin, cos, tan, radians, sqrt, fabs
+from math import sin, cos, tan, radians, sqrt
 import motion, time
-import numpy as np
 import ui, console
 
 # Shortcuts
@@ -20,16 +19,41 @@ _float = float
 _int = int
 _range = range
 _min = min; _max = max
-_fabs = fabs
 _enumerate = enumerate
 _triangle_strip = triangle_strip
-eps = 1e-6
 
 CUBE_EDGES = [
     (0, 1), (1, 2), (2, 3), (3, 0),
     (4, 5), (5, 6), (6, 7), (7, 4),
     (0, 4), (1, 5), (2, 6), (3, 7)
 ]
+
+# Cube face triangles for rasterization.
+# Vertex layout for cube (xmin,ymin,zmin)→(xmax,ymax,zmax):
+#   0:(xmin,ymin,zmin)  1:(xmax,ymin,zmin)  2:(xmax,ymax,zmin)  3:(xmin,ymax,zmin)
+#   4:(xmin,ymin,zmax)  5:(xmax,ymin,zmax)  6:(xmax,ymax,zmax)  7:(xmin,ymax,zmax)
+# Each entry: (v0_idx, v1_idx, v2_idx, normal_x, normal_y, normal_z)
+CUBE_FACE_TRIS = (
+    (4, 5, 7,  0,  0,  1),  # Front  z+
+    (5, 6, 7,  0,  0,  1),
+    (1, 0, 2,  0,  0, -1),  # Back   z-
+    (0, 3, 2,  0,  0, -1),
+    (5, 1, 6,  1,  0,  0),  # Right  x+
+    (1, 2, 6,  1,  0,  0),
+    (0, 4, 3, -1,  0,  0),  # Left   x-
+    (4, 7, 3, -1,  0,  0),
+    (7, 6, 3,  0,  1,  0),  # Top    y+
+    (6, 2, 3,  0,  1,  0),
+    (0, 1, 4,  0, -1,  0),  # Bottom y-
+    (1, 5, 4,  0, -1,  0),
+)
+
+# Normalized sun direction: (1, 1.2, -0.8) / ||(1, 1.2, -0.8)||
+_SUN_X = 0.5773502691896258
+_SUN_Y = 0.6928203230275509
+_SUN_Z = -0.4618802153517006
+_MIN_INTENSITY = 0.3
+_NEAR_CLIP = 0.1
 
 
 class Gizmo(ShapeNode):
@@ -94,7 +118,6 @@ class Game(Scene):
         self.pitch = self.yaw = self.roll = 0.0
         self.fov_tan = tan(radians(70) * 0.5)
         self.Plus = radians(90)
-        self.res = 10
 
         if debug:
             if VR:
@@ -108,7 +131,6 @@ class Game(Scene):
             for g in self.gizmos:
                 self.add_child(g)
 
-        B = []
         raw_blocks = [
             (0, 0, 0, 10, '#ff0000'), (0, 15, 0, 10, '#00ff00'),
             (0, 30, 0, 10, '#0000ff'), (0, 45, 0, 10, '#ffff00'),
@@ -137,42 +159,33 @@ class Game(Scene):
             (60, 45, 15, 10, '#ffff00'), (60, 60, 15, 10, '#ff00ff'),
         ]
 
-        # --- Optimization: pre-parse colors and pre-compute centers ---
+        # Pre-compute flat-shaded triangle list (12 triangles per block).
+        all_triangles = []
         for x, y, z, s, c in raw_blocks:
-            xm = x + s; ym = y + s; zm = z + s
-            rgb = _parse_hex(c)
-            B.append((
-                _float(x), _float(y), _float(z),
-                _float(xm), _float(ym), _float(zm),
-                _float(x + s * 0.5), _float(y + s * 0.5), _float(z + s * 0.5),
-                c, rgb[0], rgb[1], rgb[2]
-            ))
-        self.blocks = B
-
-        # --- Optimization: pre-compute pixel NDC values once (resize recalcs) ---
-        self._precompute_screen(self.size.w, self.size.h)
-
-    def _precompute_screen(self, w, h):
-        """Cache screen-space ray multipliers so we don't recompute per-frame."""
-        res = self.res
-        fov = self.fov_tan
-        aspect = w / h
-        inv_sx2 = 2.0 * res / w
-        inv_sy2 = 2.0 * res / h
-
-        if VR:
-            sx = _int(w // res) // 2
-        else:
-            sx = _int(w // res)
-        sy = _int(h // res)
-
-        # Store as tuples for fast iteration (avoid repeated attr lookup)
-        self._px_mul = tuple(((px + 0.5) * inv_sx2 - 1.0) * fov * aspect for px in _range(sx))
-        self._py_mul = tuple(((py + 0.5) * inv_sy2 - 1.0) * fov for py in _range(sy))
-        self._sx = sx
-        self._sy = sy
-        self._cached_w = w
-        self._cached_h = h
+            xmin = _float(x); ymin = _float(y); zmin = _float(z)
+            xmax = xmin + s;  ymax = ymin + s;  zmax = zmin + s
+            r0, g0, b0 = _parse_hex(c)
+            verts = (
+                (xmin, ymin, zmin), (xmax, ymin, zmin),
+                (xmax, ymax, zmin), (xmin, ymax, zmin),
+                (xmin, ymin, zmax), (xmax, ymin, zmax),
+                (xmax, ymax, zmax), (xmin, ymax, zmax),
+            )
+            for i0, i1, i2, nx, ny, nz in CUBE_FACE_TRIS:
+                if shading:
+                    dot = nx * _SUN_X + ny * _SUN_Y + nz * _SUN_Z
+                    if dot < 0.0:
+                        dot = 0.0
+                    intensity = _MIN_INTENSITY + (1.0 - _MIN_INTENSITY) * dot
+                    tri_color = '#{:02x}{:02x}{:02x}'.format(
+                        _int(r0 * intensity),
+                        _int(g0 * intensity),
+                        _int(b0 * intensity),
+                    )
+                else:
+                    tri_color = c
+                all_triangles.append((verts[i0], verts[i1], verts[i2], tri_color))
+        self.all_triangles = all_triangles
 
     def motion_update(self):
         t = _time()
@@ -184,23 +197,22 @@ class Game(Scene):
 
     def render(self):
         posx, posy, posz = self.pos
-        w, h, res = self.size.w, self.size.h, self.res
-
-        # Recompute screen cache only if size changed
-        if w != self._cached_w or h != self._cached_h:
-            self._precompute_screen(w, h)
-
-        sx = self._sx
-        sy = self._sy
-        px_mul = self._px_mul
-        py_mul = self._py_mul
+        w, h = self.size.w, self.size.h
+        half_h = h * 0.5
+        fov_tan = self.fov_tan
+        aspect = w / h
 
         if VR:
-            x_offsets = (0, w * 0.5)
+            # Each eye occupies half the screen width; project into w/4 half-viewport.
+            half_w = w * 0.25
+            x_offsets = (0.0, w * 0.5)
         else:
-            x_offsets = (0,)
+            half_w = w * 0.5
+            x_offsets = (0.0,)
 
-        # --- Rotation matrix (computed once per frame) ---
+        fov_aspect = fov_tan * aspect
+
+        # --- Rotation matrix (camera-to-world, same as original) ---
         roll_ = self.roll; pitch_ = self.pitch; yaw_ = self.yaw
         cr, sr = _cos(roll_), _sin(roll_)
         cp, sp = _cos(pitch_), _sin(pitch_)
@@ -209,158 +221,72 @@ class Game(Scene):
         r10 = cp*sr;              r11 = cp*cr;                r12 = -sp
         r20 = -sy_*cr + cy*sp*sr; r21 = sy_*sr + cy*sp*cr;   r22 = cy*cp
 
-        blocks = self.blocks
-        nblocks = len(blocks)
+        # World-to-camera transform = transpose of camera-to-world (orthonormal).
+        t00 = r00; t01 = r10; t02 = r20
+        t10 = r01; t11 = r11; t12 = r21
+        t20 = r02; t21 = r12; t22 = r22
 
-        # --- Optimization: pre-sort blocks by distance to camera (front-to-back) ---
-        # Allows early-out when a closer block is already found.
-        block_dists = []
-        for i in _range(nblocks):
-            b = blocks[i]
-            dx2 = b[6] - posx; dy2 = b[7] - posy; dz2 = b[8] - posz
-            block_dists.append((dx2*dx2 + dy2*dy2 + dz2*dz2, i))
-        block_dists.sort()
-        sorted_indices = tuple(bd[1] for bd in block_dists)
-        sorted_dists = tuple(bd[0] for bd in block_dists)
-
-        # Light (normalized once)
-        lx, ly, lz = 0.5773502691896258, 0.6928203230275509, -0.4618802153517006
-        # ^ Pre-normalized (1, 1.2, -0.8) / ||(1, 1.2, -0.8)||
-        MIN = 0.3
-        do_shading = shading
+        all_triangles = self.all_triangles
         do_edges = edges
 
+        # --- Project triangle vertices into camera space, then screen space ---
+        projected = []
+        for v0, v1, v2, tri_color in all_triangles:
+            dx = v0[0] - posx; dy = v0[1] - posy; dz = v0[2] - posz
+            c0x = t00*dx + t01*dy + t02*dz
+            c0y = t10*dx + t11*dy + t12*dz
+            c0z = t20*dx + t21*dy + t22*dz
+            if c0z < _NEAR_CLIP:
+                continue
+
+            dx = v1[0] - posx; dy = v1[1] - posy; dz = v1[2] - posz
+            c1x = t00*dx + t01*dy + t02*dz
+            c1y = t10*dx + t11*dy + t12*dz
+            c1z = t20*dx + t21*dy + t22*dz
+            if c1z < _NEAR_CLIP:
+                continue
+
+            dx = v2[0] - posx; dy = v2[1] - posy; dz = v2[2] - posz
+            c2x = t00*dx + t01*dy + t02*dz
+            c2y = t10*dx + t11*dy + t12*dz
+            c2z = t20*dx + t21*dy + t22*dz
+            if c2z < _NEAR_CLIP:
+                continue
+
+            inv_z0 = 1.0 / c0z
+            s0x = half_w + (c0x * inv_z0 / fov_aspect) * half_w
+            s0y = half_h + (c0y * inv_z0 / fov_tan) * half_h
+
+            inv_z1 = 1.0 / c1z
+            s1x = half_w + (c1x * inv_z1 / fov_aspect) * half_w
+            s1y = half_h + (c1y * inv_z1 / fov_tan) * half_h
+
+            inv_z2 = 1.0 / c2z
+            s2x = half_w + (c2x * inv_z2 / fov_aspect) * half_w
+            s2y = half_h + (c2y * inv_z2 / fov_tan) * half_h
+
+            avg_depth = (c0z + c1z + c2z) / 3.0
+            projected.append((avg_depth, s0x, s0y, s1x, s1y, s2x, s2y, tri_color))
+
+        # --- Painter's algorithm: sort back-to-front (descending depth) ---
+        projected.sort(reverse=True)
+
+        # --- Draw triangles for each viewport (mono or VR) ---
         for x_off in x_offsets:
-            hit_buf   = [[False]*sx for _ in _range(sy)]
-            color_buf = [[''] * sx for _ in _range(sy)]
-
-            for pyi in _range(len(py_mul)):
-                ny = py_mul[pyi]
-                row_hit = hit_buf[pyi]
-                row_col = color_buf[pyi]
-
-                for pxi in _range(len(px_mul)):
-                    nx = px_mul[pxi]
-
-                    # --- Ray direction (rotated) ---
-                    dx = r00*nx + r01*ny + r02
-                    dy = r10*nx + r11*ny + r12
-                    dz = r20*nx + r21*ny + r22
-                    inv_len = 1.0 / _sqrt(dx*dx + dy*dy + dz*dz)
-                    rx = dx*inv_len; ry = dy*inv_len; rz = dz*inv_len
-
-                    # Ray origin (offset by one unit along ray)
-                    x0 = posx + rx; y0 = posy + ry; z0 = posz + rz
-
-                    # Inverse ray directions for slab test
-                    arx = _fabs(rx); ary = _fabs(ry); arz = _fabs(rz)
-                    inv_rx = 1.0/rx if arx > eps else 1e18
-                    inv_ry = 1.0/ry if ary > eps else 1e18
-                    inv_rz = 1.0/rz if arz > eps else 1e18
-
-                    best_t = 1e18
-                    best_idx = -1
-
-                    # --- AABB ray intersection (front-to-back with early skip) ---
-                    for si in _range(nblocks):
-                        # If the closest possible distance for remaining blocks
-                        # exceeds best hit, we can break early.
-                        # (squared dist to center vs. squared ray-t is an approximation,
-                        #  but sorted order still helps skip far blocks.)
-                        idx = sorted_indices[si]
-                        b = blocks[idx]
-                        xmin = b[0]; ymin = b[1]; zmin = b[2]
-                        xmax = b[3]; ymax = b[4]; zmax = b[5]
-
-                        t1 = (xmin - x0) * inv_rx; t2 = (xmax - x0) * inv_rx
-                        if t1 > t2: t1, t2 = t2, t1
-                        u1 = (ymin - y0) * inv_ry; u2 = (ymax - y0) * inv_ry
-                        if u1 > u2: u1, u2 = u2, u1
-                        v1 = (zmin - z0) * inv_rz; v2 = (zmax - z0) * inv_rz
-                        if v1 > v2: v1, v2 = v2, v1
-
-                        t_near = t1 if t1 > u1 else u1
-                        if v1 > t_near: t_near = v1
-                        t_far = t2 if t2 < u2 else u2
-                        if v2 < t_far: t_far = v2
-
-                        if t_near <= t_far and t_far > 0.0 and t_near < best_t:
-                            best_t = t_near
-                            best_idx = idx
-
-                    if best_idx < 0:
-                        continue
-
-                    b = blocks[best_idx]
-                    c = b[9]  # hex color string
-
-                    # --- Combined shading + edges (compute hit point once) ---
-                    if do_shading or do_edges:
-                        hx = x0 + rx * best_t
-                        hy = y0 + ry * best_t
-                        hz = z0 + rz * best_t
-                        xmin = b[0]; ymin = b[1]; zmin = b[2]
-                        xmax = b[3]; ymax = b[4]; zmax = b[5]
-                        bs = _max(xmax-xmin, ymax-ymin, zmax-zmin)
-
-                        if do_shading:
-                            tol = bs * 1e-3
-                            dhx_min = _fabs(hx - xmin); dhx_max = _fabs(hx - xmax)
-                            dhy_min = _fabs(hy - ymin); dhy_max = _fabs(hy - ymax)
-                            dhz_min = _fabs(hz - zmin); dhz_max = _fabs(hz - zmax)
-                            if   dhx_min < tol: nl = -lx
-                            elif dhx_max < tol: nl =  lx
-                            elif dhy_min < tol: nl = -ly
-                            elif dhy_max < tol: nl =  ly
-                            elif dhz_min < tol: nl = -lz
-                            elif dhz_max < tol: nl =  lz
-                            else:               nl = 0.0
-                            if nl < 0.0: nl = 0.0
-                            intensity = MIN + (1.0 - MIN) * nl
-                            # Pre-parsed RGB from blocks tuple
-                            r0 = b[10]; g0 = b[11]; b0 = b[12]
-                            ri = _int(r0 * intensity)
-                            gi = _int(g0 * intensity)
-                            bi = _int(b0 * intensity)
-                            c = f"#{ri:02x}{gi:02x}{bi:02x}"
-
-                        if do_edges:
-                            tol_e = bs * 0.01
-                            if not do_shading:
-                                dhx_min = _fabs(hx - xmin); dhx_max = _fabs(hx - xmax)
-                                dhy_min = _fabs(hy - ymin); dhy_max = _fabs(hy - ymax)
-                                dhz_min = _fabs(hz - zmin); dhz_max = _fabs(hz - zmax)
-                            cnt = (
-                                (dhx_min < tol_e or dhx_max < tol_e) +
-                                (dhy_min < tol_e or dhy_max < tol_e) +
-                                (dhz_min < tol_e or dhz_max < tol_e)
-                            )
-                            if cnt >= 2:
-                                c = edges_color
-
-                    row_hit[pxi] = True
-                    row_col[pxi] = c
-
-            # --- Draw: run-length encoded triangle strips ---
-            for pyi in _range(sy):
-                row_hit = hit_buf[pyi]
-                row_col = color_buf[pyi]
-                y0_ = pyi * res
-                y1_ = y0_ + res
-                pxi = 0
-                while pxi < sx:
-                    if not row_hit[pxi]:
-                        pxi += 1
-                        continue
-                    run_color = row_col[pxi]
-                    start = pxi
-                    pxi += 1
-                    while pxi < sx and row_hit[pxi] and row_col[pxi] == run_color:
-                        pxi += 1
-                    x0_ = x_off + start * res
-                    x1_ = x_off + pxi * res
-                    _fill(run_color)
-                    _triangle_strip([(x0_, y0_), (x1_, y0_), (x0_, y1_), (x1_, y1_)])
+            for item in projected:
+                _, s0x, s0y, s1x, s1y, s2x, s2y, tri_color = item
+                _fill(tri_color)
+                _triangle_strip([
+                    (x_off + s0x, s0y),
+                    (x_off + s1x, s1y),
+                    (x_off + s2x, s2y),
+                ])
+                if do_edges:
+                    stroke(edges_color)
+                    stroke_weight(1)
+                    line(x_off + s0x, s0y, x_off + s1x, s1y)
+                    line(x_off + s1x, s1y, x_off + s2x, s2y)
+                    line(x_off + s2x, s2y, x_off + s0x, s0y)
 
     def stop(self):
         motion.stop_updates()
